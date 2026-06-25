@@ -1,0 +1,24 @@
+# Save as reset_hat.py on your Pi 5
+import serial
+import time
+
+try:
+    # Open connection at basic factory speed
+    ser = serial.Serial("/dev/ttyUSB0", 9600, timeout=1)
+    print("Sending global parameters factory reset command...")
+    
+    # Waveshare Hex AT-command string to restore default broadcast settings:
+    # C1 00 06 00 00 00 62 00 12
+    # This locks: Address 0, NetID 0, 9600 Baud, 868.0MHz (Channel 18)
+    reset_command = bytes([0xC1, 0x00, 0x06, 0x00, 0x00, 0x00, 0x62, 0x00, 0x12])
+    
+    ser.write(reset_command)
+    ser.flush()
+    time.sleep(1)
+    
+    response = ser.read(ser.in_waiting)
+    print(f"Module Response (Should echo back parameters starting with C1): {response.hex().upper()}")
+    ser.close()
+
+except Exception as e:
+    print(f"Error: {e}")
