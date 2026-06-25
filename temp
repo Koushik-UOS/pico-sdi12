@@ -1,0 +1,33 @@
+# Save as baud_scanner.py on your Raspberry Pi 5
+import serial
+import time
+
+SERIAL_PORT = "/dev/ttyUSB0"
+# The 4 standard baud rates the Waveshare module firmware supports
+BAUD_RATES = [9600, 115200, 57600, 19200]
+
+print("Starting Waveshare LoRa Baud Rate Scanner...")
+print("Ensure M0 and M1 are jumped to GND.")
+
+# Waveshare Transparent Mode Packet Header: Broadcast (00 00) on Channel 18 (12 = 868.0MHz)
+packet = bytes([0x00, 0x00, 0x12]) + b"Baud Sweep Test\r\n"
+
+for baud in BAUD_RATES:
+    print(f"\n[Testing Baud Rate: {baud} bps]")
+    try:
+        ser = serial.Serial(SERIAL_PORT, baudrate=baud, timeout=1)
+        
+        # Fire 4 consecutive packets to give the chip time to register
+        for i in range(4):
+            ser.write(packet)
+            ser.flush()
+            print(f" -> Sent test packet {i+1}/4")
+            time.sleep(1.5)
+            
+        ser.close()
+        
+    except Exception as e:
+        print(f" Could not test {baud}: {e}")
+
+print("\nScan complete. Review which baud rate stopped the RXD/AUX error loops!")
+  
