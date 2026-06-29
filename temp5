@@ -1,0 +1,97 @@
+import time
+import spidev
+from gpiod.line import Direction, Value
+import gpiod
+
+# --- SPI Setup ---
+spi = spidev.SpiDev()
+spi.open(0, 0)
+spi.max_speed_hz = 2000000  # Safe 2MHz clock speed
+spi.mode = 0b00
+
+# --- GPIO Setup ---
+chip = gpiod.Chip('/dev/gpiochip4')
+req_reset = chip.request_lines(config={6: gpiod.LineSettings(direction=Direction.OUTPUT)})
+req_busy = chip.request_lines(config={23: gpiod.LineSettings(direction=Direction.INPUT)})
+
+def wait_busy():
+    while req_busy.get_value(23) == Value.ACTIVE:
+        time.sleep(0.001)
+
+def write_cmd(cmd, params=[]):
+    wait_busy()
+    spi.xfer2([cmd] + params)
+
+def read_cmd(cmd, num_bytes):
+    wait_busy()
+    # SX1262 requires a dummy status byte during reads
+    response = spi.xfer2([cmd, 0x00] + [0x00] * num_bytes)
+    return response[2:]  # Strip command and dummy byte to return actual payload
+
+def reset_module():
+    req_reset.set_value(6, Value.ACTIVE)
+    time.sleep(0.02)
+    req_reset.set_value(6, Value.INACTIVE)
+    time.sleep(0.02)
+    wait_busy()
+
+print("📡 Initialising Pi 5 LoRa HAT over raw SPI...")
+reset_module()
+
+# 1. Set Standby Mode
+write_cmd(0x80, [0x00])  # STDBY_RC
+
+# 2. Set Packet Type to LoRa
+write_cmd(0x8A, [0x01])  # 0x01 = LoRa Mode
+
+# 3. Configure RF Frequency to exactly 868.0 MHz
+# Formula: (868,000,000 * 2^25) / 32,000,000 = 910163968 = 0x363D70A0
+write_cmd(0x86, [0x36, 0x3D, 0x70, 0xA0])
+
+# 4. Set Base Operating Modulation Parameters (SF=7, BW=125kHz, CR=4/5)
+# SF=7 (0x07), BW=125kHz (0x04), CR=4/5 (0x01), LowDataRateOptimize=0x00
+write_cmd(0x8B, [0x07, 0x04, 0x01, 0x00])
+
+# 5. Set Packet Parameters (Preamble, Header, Payload Length, CRC, Inverted IQ)
+# Preamble=8 (0x00, 0x08), Explicit Header (0x00), Max Payload=255 (0xFF), CRC On (0x01), Standard IQ (0x00)
+write_cmd(0x8C, [0x00, 0x08, 0x00, 0xFF, 0x01, 0x00])
+
+# 6. Put module into Continuous Rx Mode to listen indefinitely
+# Rx Timeout = 0xFFFFFF (Continuous listening)
+write_cmd(0x82, [0xFF, 0xFF, 0xFF])
+
+print("✅ Tuning Complete: Listening on 868.0 MHz (SF7, BW125)...")
+
+try:
+    while True:
+        # Read the 16-bit IRQ status flag (Command 0x12, expecting 2 bytes back)
+        irq_bytes = read_cmd(0x12, 2)
+        irq_status = (irq_bytes[0] << 8) | irq_bytes[1]
+        
+        # Check Bit 1 (0x02) which flags RxDone (Packet complete)
+        if irq_status & 0x02:
+            print("\n📥 Packet detected from Pico!")
+            
+            # Clear IRQ status bits so the module can receive the next packet
+            write_cmd(0x02, [0x03, 0xFF])
+            
+            # Read Rx Buffer Status (Command 0x13) to see where the data sits
+            # Returns [PayloadLength, RxStartBufferPointer]
+            buffer_info = read_cmd(0x13, 2)
+            length = buffer_info[0]
+            start_ptr = buffer_info[1]
+            
+            # Read the raw payload buffer (Command 0x1E)
+            if length > 0:
+                raw_payload = read_cmd(0x1E, length)
+                try:
+                    decoded_msg = bytes(raw_payload).decode('utf-8', errors='ignore').strip()
+                    print(f"💬 Decoded Content: {decoded_msg}")
+                except Exception:
+                    print(f"📦 Raw Hex Payload: {bytes(raw_payload).hex()}")
+                    
+        time.sleep(0.2)
+        
+except KeyboardInterrupt:
+    print("\nShutting down listener.")
+    spi.close()
