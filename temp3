@@ -1,0 +1,63 @@
+import time
+import spidev
+from gpiod.line import Direction, Value
+import gpiod
+
+# --- Waveshare Pi HAT Physical SPI Pin Mapping ---
+# SPI0 is used (Device 0, Chip Select 0)
+# Reset Pin = GPIO 6, Busy Pin = GPIO 23, DIO1 (Interrupt) = GPIO 22
+
+# Setup SPI
+spi = spidev.SpiDev()
+spi.open(0, 0)
+spi.max_speed_hz = 2000000  # Safe 2MHz clock
+spi.mode = 0b00
+
+# Setup GPIO Control Lines using modern gpiod
+chip = gpiod.Chip('/dev/gpiochip4') # Main Pi 5 GPIO Chip
+
+# Request the Reset and Busy Pins
+req_reset = chip.request_lines(config={6: gpiod.LineSettings(direction=Direction.OUTPUT)})
+req_busy = chip.request_lines(config={23: gpiod.LineSettings(direction=Direction.INPUT)})
+
+def reset_module():
+    req_reset.set_values({6: Value.ACTIVE})
+    time.sleep(0.02)
+    req_reset.set_values({6: Value.INACTIVE})
+    time.sleep(0.02)
+    wait_busy()
+
+def wait_busy():
+    # Loop until the Busy pin drops low, meaning the chip is ready for SPI data
+    while req_busy.get_values({23: Value.ACTIVE})[23] == Value.ACTIVE:
+        time.sleep(0.001)
+
+def write_command(cmd, params=[]):
+    wait_busy()
+    # Format command layout for the SX1262
+    spi.xfer2([cmd] + params)
+
+print("📡 Initialising Pi 5 LoRa HAT via Hardware SPI...")
+reset_module()
+
+# Put SX1262 into Standby mode to ready configuration registers
+write_command(0x80, [0x00]) # SetStandby (0=STDBY_RC)
+print("✅ SX1262 Ready. Listening for raw Pico transmissions on 868MHz...")
+
+# (This loop simulates continuous passive packet listening)
+try:
+    while True:
+        # Check if radio has caught a packet (Polling IRQ Status)
+        wait_busy()
+        irq_status = spi.xfer2([0x12, 0x00, 0x00]) # GetIrqStatus
+        
+        # If RX Done flag is high, extract payload
+        if irq_status[2] & 0x02:
+            print("📥 Packet detected from Pico!")
+            # Clear IRQ
+            write_command(0x02, [0x03, 0xFF])
+            
+        time.sleep(0.5)
+except KeyboardInterrupt:
+    print("\nShutting down listener.")
+    spi.close()
