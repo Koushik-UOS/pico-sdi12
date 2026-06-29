@@ -1,0 +1,58 @@
+import time
+import spidev
+from gpiod.line import Direction, Value
+import gpiod
+
+# --- Waveshare Pi HAT Physical SPI Pin Mapping ---
+spi = spidev.SpiDev()
+spi.open(0, 0)
+spi.max_speed_hz = 2000000  # Safe 2MHz clock
+spi.mode = 0b00
+
+# Setup GPIO Control Lines using modern gpiod
+chip = gpiod.Chip('/dev/gpiochip4')  # Main Pi 5 GPIO Chip
+
+# Request the Reset and Busy Pins
+req_reset = chip.request_lines(config={6: gpiod.LineSettings(direction=Direction.OUTPUT)})
+req_busy = chip.request_lines(config={23: gpiod.LineSettings(direction=Direction.INPUT)})
+
+def reset_module():
+    req_reset.set_values({6: Value.ACTIVE})
+    time.sleep(0.02)
+    req_reset.set_values({6: Value.INACTIVE})
+    time.sleep(0.02)
+    wait_busy()
+
+def wait_busy():
+    # FIXED: get_values() returns a list. Index 0 is our requested pin (23).
+    # We loop as long as the first element in that list is ACTIVE (High).
+    while list(req_busy.get_values().values())[0] == Value.ACTIVE:
+        time.sleep(0.001)
+
+def write_command(cmd, params=[]):
+    wait_busy()
+    spi.xfer2([cmd] + params)
+
+print("📡 Initialising Pi 5 LoRa HAT via Hardware SPI...")
+reset_module()
+
+# Put SX1262 into Standby mode to ready configuration registers
+write_command(0x80, [0x00]) # SetStandby (0=STDBY_RC)
+print("✅ SX1262 Ready. Listening for raw Pico transmissions on 868MHz...")
+
+try:
+    while True:
+        wait_busy()
+        # Read IRQ Status register (0x12) from the SX1262
+        irq_status = spi.xfer2([0x12, 0x00, 0x00])
+        
+        # Check if the RX_DONE bit is set in the response bytes
+        # irq_status[1] or [2] usually holds the register data payload byte depending on spi transfer structure
+        if len(irq_status) > 2 and (irq_status[2] & 0x02):
+            print("📥 Packet detected from Pico!")
+            write_command(0x02, [0x03, 0xFF])  # Clear IRQ flags
+            
+        time.sleep(0.5)
+except KeyboardInterrupt:
+    print("\nShutting down listener.")
+    spi.close()
